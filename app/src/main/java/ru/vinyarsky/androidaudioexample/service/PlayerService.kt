@@ -20,19 +20,16 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.media.session.MediaButtonReceiver
-import com.google.android.exoplayer2.DefaultLoadControl
-import com.google.android.exoplayer2.DefaultRenderersFactory
 import com.google.android.exoplayer2.ExoPlaybackException
-import com.google.android.exoplayer2.ExoPlayerFactory
 import com.google.android.exoplayer2.PlaybackParameters
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.SimpleExoPlayer
+import com.google.android.exoplayer2.database.ExoDatabaseProvider
 import com.google.android.exoplayer2.ext.okhttp.OkHttpDataSourceFactory
 import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory
 import com.google.android.exoplayer2.extractor.ExtractorsFactory
-import com.google.android.exoplayer2.source.ExtractorMediaSource
+import com.google.android.exoplayer2.source.ProgressiveMediaSource
 import com.google.android.exoplayer2.source.TrackGroupArray
-import com.google.android.exoplayer2.trackselection.DefaultTrackSelector
 import com.google.android.exoplayer2.trackselection.TrackSelectionArray
 import com.google.android.exoplayer2.upstream.DataSource
 import com.google.android.exoplayer2.upstream.cache.CacheDataSource
@@ -66,14 +63,7 @@ class PlayerService : Service() {
     )
 
     private val exoPlayer: SimpleExoPlayer by lazy(LazyThreadSafetyMode.NONE) {
-        ExoPlayerFactory
-            .newSimpleInstance(
-                this,
-                DefaultRenderersFactory(this),
-                DefaultTrackSelector(),
-                DefaultLoadControl()
-            )
-            .apply { addListener(playerListener) }
+        SimpleExoPlayer.Builder(this).build().apply { addListener(playerListener) }
     }
 
     /**
@@ -237,9 +227,7 @@ class PlayerService : Service() {
             if (uri != currentUri) {
                 currentUri = uri
                 exoPlayer.prepare(
-                    ExtractorMediaSource.Factory(dataSourceFactory)
-                        .setExtractorsFactory(extractorsFactory)
-                        .createMediaSource(uri)
+                    ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory).createMediaSource(uri)
                 )
             }
         }
@@ -265,7 +253,7 @@ class PlayerService : Service() {
         val cacheEvictor = LeastRecentlyUsedCacheEvictor(1024 * 1024 * 100) // 100 Mb max
         val userAgent = Util.getUserAgent(this, getString(R.string.app_name))
         CacheDataSourceFactory(
-            SimpleCache(cacheFile, cacheEvictor),
+            SimpleCache(cacheFile, cacheEvictor, ExoDatabaseProvider(this)),
             OkHttpDataSourceFactory(OkHttpClient(), userAgent),
             CacheDataSource.FLAG_BLOCK_ON_CACHE or CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
         )
