@@ -3,6 +3,8 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/AndroidAudioExample.iml" filepath="$PROJECT_DIR$/AndroidAudioExample.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/AndroidAudioExample-app.iml" filepath="$PROJECT_DIR$/.idea/modules/app/AndroidAudioExample-app.iml" group="AndroidAudioExample/app" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/StudioProjects-AndroidAudioExample.iml" filepath="$PROJECT_DIR$/.idea/modules/StudioProjects-AndroidAudioExample.iml" group="AndroidAudioExample" />
       <module fileurl="file://$PROJECT_DIR$/app/app.iml" filepath="$PROJECT_DIR$/app/app.iml" />
     </modules>
   </component>
