@@ -1,11 +1,47 @@
 package ru.vinyarsky.androidaudioexample.service
 
 import android.net.Uri
+import android.os.Parcelable
+import kotlinx.android.parcel.IgnoredOnParcel
+import kotlinx.android.parcel.Parcelize
 import ru.vinyarsky.androidaudioexample.R
 
-//https://simpleguics2pygame.readthedocs.io/en/latest/_static/links/snd_links.html
+class Track(
+    val title: String,
+    val artist: String,
+    val bitmapResId: Int,
+    uriString: String,
+    val durationMs: Long
+) {
+    val uri: Uri = Uri.parse(uriString)
+}
 
-internal class MusicRepository {
+interface MusicRepository : Parcelable {
+    val current: Track
+}
+
+interface SingleTrackRepository : MusicRepository
+
+interface MultiTrackRepository : MusicRepository {
+    fun previous(): Track
+    fun next(): Track
+}
+
+@Parcelize
+class SingleTrackRepositoryImpl : SingleTrackRepository {
+    override val current: Track
+        get() = Track(
+            "Triangle",
+            "Jason Shaw",
+            R.drawable.image266680,
+            uriString = "https://codeskulptor-demos.commondatastorage.googleapis.com/pang/paza-moduless.mp3",
+            durationMs = (3 * 60 + 41) * 1000
+        )
+}
+
+@Parcelize
+class MultiTrackRepositoryImpl : MultiTrackRepository {
+    @IgnoredOnParcel
     private val data = listOf(
         Track(
             "Triangle",
@@ -44,31 +80,22 @@ internal class MusicRepository {
         )
     )
 
+    @IgnoredOnParcel
     private val maxIndex = data.size - 1
+
+    @IgnoredOnParcel
     private var currentItemIndex = 0
 
-    val next: Track
-        get() {
-            if (currentItemIndex == maxIndex) currentItemIndex = 0 else currentItemIndex++
-            return current
-        }
-
-    val previous: Track
-        get() {
-            if (currentItemIndex == 0) currentItemIndex = maxIndex else currentItemIndex--
-            return current
-        }
-
-    val current: Track
-        get() = data[currentItemIndex]
-
-    class Track(
-        val title: String,
-        val artist: String,
-        val bitmapResId: Int,
-        uriString: String,
-        val durationMs: Long
-    ) {
-        val uri: Uri = Uri.parse(uriString)
+    override fun next(): Track {
+        if (currentItemIndex == maxIndex) currentItemIndex = 0 else currentItemIndex++
+        return current
     }
+
+    override fun previous(): Track {
+        if (currentItemIndex == 0) currentItemIndex = maxIndex else currentItemIndex--
+        return current
+    }
+
+    override val current: Track
+        get() = data[currentItemIndex]
 }

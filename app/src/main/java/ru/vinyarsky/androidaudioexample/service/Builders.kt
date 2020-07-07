@@ -46,7 +46,12 @@ internal fun audioFocusRequest(audioFocusChangeListener: AudioManager.OnAudioFoc
  * @param notificationChannelId Айди для нотификационного канала для Андроида 8.
  * @return уведомление с информацией из данного медиа-сеанса.
  */
-internal fun MediaSessionCompat.createNotification(context: Context, playbackState: Int, notificationChannelId: String): Notification {
+internal fun MediaSessionCompat.createNotification(
+    context: Context,
+    playbackState: Int,
+    notificationChannelId: String,
+    usePreviousAndNext: Boolean
+): Notification {
     val description = controller.metadata.description
     val channelId = context.getString(R.string.default_notification_channel_id)
     val builder = NotificationCompat.Builder(context, channelId)
@@ -60,14 +65,16 @@ internal fun MediaSessionCompat.createNotification(context: Context, playbackSta
 
     // Добавляем кнопки
 
-    // ...на предыдущий трек
-    builder.addAction(
-        NotificationCompat.Action(
-            android.R.drawable.ic_media_previous,
-            context.getString(R.string.previous),
-            MediaButtonReceiver.buildMediaButtonPendingIntent(context, PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
+    if (usePreviousAndNext) {
+        // ...на предыдущий трек
+        builder.addAction(
+            NotificationCompat.Action(
+                android.R.drawable.ic_media_previous,
+                context.getString(R.string.previous),
+                MediaButtonReceiver.buildMediaButtonPendingIntent(context, PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
+            )
         )
-    )
+    }
 
     // ...play/pause
     builder.addAction(
@@ -86,19 +93,21 @@ internal fun MediaSessionCompat.createNotification(context: Context, playbackSta
         }
     )
 
-    // ...на следующий трек
-    builder.addAction(
-        NotificationCompat.Action(
-            android.R.drawable.ic_media_next,
-            context.getString(R.string.next),
-            MediaButtonReceiver.buildMediaButtonPendingIntent(context, PlaybackStateCompat.ACTION_SKIP_TO_NEXT)
+    if (usePreviousAndNext) {
+        // ...на следующий трек
+        builder.addAction(
+            NotificationCompat.Action(
+                android.R.drawable.ic_media_next,
+                context.getString(R.string.next),
+                MediaButtonReceiver.buildMediaButtonPendingIntent(context, PlaybackStateCompat.ACTION_SKIP_TO_NEXT)
+            )
         )
-    )
+    }
 
     builder.setStyle(
         androidx.media.app.NotificationCompat.MediaStyle()
             // В компактном варианте показывать Action с данным порядковым номером. В нашем случае это play/pause.
-            .setShowActionsInCompactView(1)
+            .setShowActionsInCompactView(0)
             // Указываем, что делать при смахивании
             .setCancelButtonIntent(
                 MediaButtonReceiver.buildMediaButtonPendingIntent(context, PlaybackStateCompat.ACTION_STOP)
@@ -126,7 +135,7 @@ internal fun MediaSessionCompat.createNotification(context: Context, playbackSta
 }
 
 /** @return метадату для трека. */
-internal fun MusicRepository.Track.createMetadata(context: Context): MediaMetadataCompat =
+internal fun Track.createMetadata(context: Context): MediaMetadataCompat =
     MediaMetadataCompat.Builder()
         .putBitmap(MediaMetadataCompat.METADATA_KEY_ART, BitmapFactory.decodeResource(context.resources, bitmapResId))
         .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)

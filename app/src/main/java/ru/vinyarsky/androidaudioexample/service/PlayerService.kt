@@ -39,7 +39,7 @@ import com.google.android.exoplayer2.upstream.cache.SimpleCache
 import com.google.android.exoplayer2.util.Util
 import okhttp3.OkHttpClient
 import ru.vinyarsky.androidaudioexample.R
-import ru.vinyarsky.androidaudioexample.ui.MainActivity
+import ru.vinyarsky.androidaudioexample.getParcelable
 import java.io.File
 
 /**
@@ -53,14 +53,15 @@ class PlayerService : Service() {
      * Например, если мы не укажем ACTION_PAUSE, то нажатие на паузу не вызовет onPause.
      * ACTION_PLAY_PAUSE обязателен, иначе не будет работать управление с Android Wear!
      */
-    private val playbackStateBuilder = PlaybackStateCompat.Builder().setActions(
-        PlaybackStateCompat.ACTION_PLAY
-            or PlaybackStateCompat.ACTION_STOP
-            or PlaybackStateCompat.ACTION_PAUSE
-            or PlaybackStateCompat.ACTION_PLAY_PAUSE
-            or PlaybackStateCompat.ACTION_SKIP_TO_NEXT
-            or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-    )
+    private val playbackStateBuilder: PlaybackStateCompat.Builder by lazy(LazyThreadSafetyMode.NONE) {
+        PlaybackStateCompat.Builder().setActions(
+            PlaybackStateCompat.ACTION_PLAY
+                or PlaybackStateCompat.ACTION_STOP
+                or PlaybackStateCompat.ACTION_PAUSE
+                or PlaybackStateCompat.ACTION_PLAY_PAUSE
+                or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+        )
+    }
 
     private val exoPlayer: SimpleExoPlayer by lazy(LazyThreadSafetyMode.NONE) {
         SimpleExoPlayer.Builder(this).build().apply { addListener(playerListener) }
@@ -82,9 +83,6 @@ class PlayerService : Service() {
         getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
 
-    /** Репозиторий с музыкой. */
-    private val musicRepository = MusicRepository()
-
     override fun onCreate() {
         super.onCreate()
 
@@ -93,7 +91,7 @@ class PlayerService : Service() {
             val notificationChannel = NotificationChannel(
                 NOTIFICATION_DEFAULT_CHANNEL_ID,
                 getString(R.string.notification_channel_name),
-                NotificationManagerCompat.IMPORTANCE_DEFAULT
+                NotificationManagerCompat.IMPORTANCE_LOW
             )
             val notificationManager =
                 getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -102,6 +100,7 @@ class PlayerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
+        initServiceIfNotYet(intent)
         /*
             MediaButtonReceiver при получении события ищет в приложении сервис,
             который также принимает "android.intent.action.MEDIA_BUTTON" и перенаправляет его туда.
@@ -111,37 +110,73 @@ class PlayerService : Service() {
         return super.onStartCommand(intent, flags, startId)
     }
 
+    private fun initServiceIfNotYet(intent: Intent) {
+        if (!isServiceInitialized) {
+            isServiceInitialized = true
+            musicRepository = intent.getParcelable(MUSIC_REPO)
+            mediaSession.setSessionActivity(intent.getParcelable(PENDING_INTENT))
+            setDefaultState(musicRepository.current, intent.getBooleanExtra(PLAY_ON_START, false))
+        }
+    }
+
+    private var isServiceInitialized = false
+    private lateinit var musicRepository: MusicRepository
+
+    private fun setDefaultState(currentTrack: Track, playOnStart: Boolean) {
+        mediaSession.setMetadata(currentTrack.createMetadata(context = this@PlayerService))
+        // Указываем, что наше приложение теперь активный плеер и кнопки
+        // на окне блокировки должны управлять именно нами
+        // Сразу после получения фокуса
+        mediaSession.isActive = true
+
+        if (playOnStart) {
+            mediaSessionCallback.onPlay()
+        } else {
+            // Обязательно стартуем, иначе будет ANR
+            startForeground(NOTIFICATION_ID, createNotification(PlaybackStateCompat.STATE_PAUSED))
+            // А потом убираем из форграунда, давая возможность включить из пуш уведомления.
+            mediaSessionCallback.onPause()
+        }
+    }
+
+    /** Для доступа извне к MediaSession требуется токен. Для этого научим сервис его отдавать. */
+    override fun onBind(intent: Intent): IBinder =
+        PlayerServiceBinder(mediaSession)
+
     override fun onDestroy() {
         super.onDestroy()
         // Ресурсы освобождать обязательно
         mediaSession.release()
         exoPlayer.release()
+        try {
+            unregisterReceiver(becomingNoisyReceiver)
+        } catch (e: IllegalArgumentException) {
+            // На случай, если сервис не был прибинден, а следственно и не регистрировался ресейвер.
+        }
     }
 
     private val mediaSession: MediaSessionCompat by lazy(LazyThreadSafetyMode.NONE) {
         val debugTag = "PlayerService"
-        MediaSessionCompat(this, debugTag).apply {
-            // Отдаем наши коллбэки
-            setCallback(mediaSessionCallback)
-
-            // Укажем activity, которую запустит система, если пользователь заинтересуется подробностями данной сессии
-            val activityIntent = Intent(applicationContext, MainActivity::class.java)
-            setSessionActivity(PendingIntent.getActivity(applicationContext, 0, activityIntent, 0))
-        }
+        MediaSessionCompat(this, debugTag).apply { setCallback(mediaSessionCallback) }
     }
 
     private val mediaSessionCallback: MediaSessionCompat.Callback = object : MediaSessionCompat.Callback() {
         private var currentState = PlaybackStateCompat.STATE_STOPPED
+            set(value) {
+                field = value
+                updatePlaybackState(value)
+                refreshNotificationAndForegroundStatus(value)
+            }
 
-        private var audioFocusRequested = false
+        private var isAudioFocusRequested = false
 
         override fun onPlay() {
             if (!exoPlayer.playWhenReady) {
                 val track = musicRepository.current
                 mediaSession.setMetadata(track.createMetadata(context = this@PlayerService))
                 prepareToPlay(track.uri)
-                if (!audioFocusRequested) {
-                    audioFocusRequested = true
+                if (!isAudioFocusRequested) {
+                    isAudioFocusRequested = true
                     if (abandonAudioFocus() != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return
                 }
 
@@ -161,15 +196,7 @@ class PlayerService : Service() {
                 // Запускаем воспроизведение
                 exoPlayer.playWhenReady = true
             }
-            mediaSession.setPlaybackState(
-                playbackStateBuilder.setState(
-                    PlaybackStateCompat.STATE_PLAYING,
-                    PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
-                    1f
-                ).build()
-            )
             currentState = PlaybackStateCompat.STATE_PLAYING
-            refreshNotificationAndForegroundStatus(currentState)
         }
 
         override fun onPause() {
@@ -180,15 +207,7 @@ class PlayerService : Service() {
             }
 
             // Сообщаем новое состояние
-            mediaSession.setPlaybackState(
-                playbackStateBuilder.setState(
-                    PlaybackStateCompat.STATE_PAUSED,
-                    PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
-                    1f
-                ).build()
-            )
             currentState = PlaybackStateCompat.STATE_PAUSED
-            refreshNotificationAndForegroundStatus(currentState)
         }
 
         override fun onStop() {
@@ -197,30 +216,24 @@ class PlayerService : Service() {
                 exoPlayer.playWhenReady = false
                 unregisterReceiver(becomingNoisyReceiver)
             }
-            if (audioFocusRequested) {
-                audioFocusRequested = false
+            if (isAudioFocusRequested) {
+                isAudioFocusRequested = false
                 abandonAudioFocus()
             }
             // Все, больше мы не "главный" плеер, уходим со сцены
             mediaSession.isActive = false
             // Сообщаем новое состояние
-            mediaSession.setPlaybackState(
-                playbackStateBuilder.setState(
-                    PlaybackStateCompat.STATE_STOPPED,
-                    PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
-                    1f
-                ).build()
-            )
             currentState = PlaybackStateCompat.STATE_STOPPED
-            refreshNotificationAndForegroundStatus(currentState)
             stopSelf()
         }
 
-        override fun onSkipToNext() =
-            changeTrack(musicRepository.next)
+        override fun onSkipToNext() {
+            (musicRepository as? MultiTrackRepository)?.let { changeTrack(it.next()) }
+        }
 
-        override fun onSkipToPrevious() =
-            changeTrack(musicRepository.previous)
+        override fun onSkipToPrevious() {
+            (musicRepository as? MultiTrackRepository)?.let { changeTrack(it.previous()) }
+        }
 
         private var currentUri: Uri? = null
         private fun prepareToPlay(uri: Uri) {
@@ -240,10 +253,38 @@ class PlayerService : Service() {
                 audioManager.abandonAudioFocus(audioFocusChangeListener)
             }
 
-        private fun changeTrack(track: MusicRepository.Track) {
+        private fun changeTrack(track: Track) {
             mediaSession.setMetadata(track.createMetadata(context = this@PlayerService))
             refreshNotificationAndForegroundStatus(currentState)
             prepareToPlay(track.uri)
+        }
+    }
+
+    private fun updatePlaybackState(playbackState: Int) {
+        mediaSession.setPlaybackState(
+            playbackStateBuilder.setState(
+                playbackState,
+                PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
+                1f
+            ).build()
+        )
+    }
+
+    private fun refreshNotificationAndForegroundStatus(playbackState: Int) {
+        when (playbackState) {
+            PlaybackStateCompat.STATE_PLAYING ->
+                startForeground(NOTIFICATION_ID, createNotification(playbackState))
+
+            PlaybackStateCompat.STATE_PAUSED -> {
+                // На паузе мы перестаем быть foreground, однако оставляем уведомление, чтобы пользователь мог нажать play.
+                NotificationManagerCompat
+                    .from(this@PlayerService)
+                    .notify(NOTIFICATION_ID, createNotification(playbackState))
+                stopForeground(false)
+            }
+            else ->
+                // Все, можно прятать уведомление
+                stopForeground(true)
         }
     }
 
@@ -259,7 +300,7 @@ class PlayerService : Service() {
         )
     }
 
-    private val audioFocusChangeListener = OnAudioFocusChangeListener { focusChange ->
+    private val audioFocusChangeListener: OnAudioFocusChangeListener = OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN ->
                 // Фокус предоставлен.
@@ -285,7 +326,7 @@ class PlayerService : Service() {
         }
     }
 
-    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+    private val becomingNoisyReceiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // Disconnecting headphones - stop playback
             if (AudioManager.ACTION_AUDIO_BECOMING_NOISY == intent.action) {
@@ -307,36 +348,25 @@ class PlayerService : Service() {
         }
     }
 
-    /** Для доступа извне к MediaSession требуется токен. Для этого научим сервис его отдавать. */
-    override fun onBind(intent: Intent): IBinder? =
-        PlayerServiceBinder(mediaSession)
-
-    private fun refreshNotificationAndForegroundStatus(playbackState: Int) {
-        when (playbackState) {
-            PlaybackStateCompat.STATE_PLAYING ->
-                startForeground(NOTIFICATION_ID, createNotification(playbackState))
-
-            PlaybackStateCompat.STATE_PAUSED -> {
-                // На паузе мы перестаем быть foreground, однако оставляем уведомление, чтобы пользователь мог нажать play.
-                NotificationManagerCompat
-                    .from(this@PlayerService)
-                    .notify(NOTIFICATION_ID, createNotification(playbackState))
-                stopForeground(false)
-            }
-            else ->
-                // Все, можно прятать уведомление
-                stopForeground(true)
-        }
-    }
-
     private fun createNotification(playbackState: Int): Notification =
         mediaSession.createNotification(
             context = this,
             playbackState = playbackState,
-            notificationChannelId = NOTIFICATION_DEFAULT_CHANNEL_ID
+            notificationChannelId = NOTIFICATION_DEFAULT_CHANNEL_ID,
+            usePreviousAndNext = musicRepository is MultiTrackRepository
         )
 
-    private companion object {
+    companion object {
+        private const val MUSIC_REPO = "music_repository"
+        private const val PENDING_INTENT = "pending_intent"
+        private const val PLAY_ON_START = "play_on_start"
+
+        fun putParams(intent: Intent, musicRepository: MusicRepository, pendingIntent: PendingIntent, playOnStart: Boolean) {
+            intent.putExtra(MUSIC_REPO, musicRepository)
+            intent.putExtra(PENDING_INTENT, pendingIntent)
+            intent.putExtra(PLAY_ON_START, playOnStart)
+        }
+
         private const val NOTIFICATION_ID = 404
         private const val NOTIFICATION_DEFAULT_CHANNEL_ID = "default_channel"
     }
