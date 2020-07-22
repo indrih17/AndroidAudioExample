@@ -15,7 +15,9 @@ import android.media.AudioManager.OnAudioFocusChangeListener
 import android.net.Uri
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationManagerCompat
@@ -43,6 +45,26 @@ import ru.vinyarsky.androidaudioexample.getParcelable
 import java.io.File
 
 /**
+ * [Runnable] для постепенного увеличения громкости.
+ * @param exoPlayer [SimpleExoPlayer].
+ * @param handler То, где мы будем запускать этот же [Runnable] после задержки.
+ * @param fadeInSpeed [FadeSpeed].
+ */
+class VolumeRunnable(
+    private val exoPlayer: SimpleExoPlayer,
+    private val handler: Handler,
+    private val fadeInSpeed: FadeSpeed
+) : Runnable {
+    override fun run() {
+        val currentVolume = exoPlayer.volume
+        if (currentVolume < 1f) {
+            exoPlayer.volume += fadeInSpeed.onEach
+            handler.postDelayed(this, fadeInSpeed.delayMs)
+        }
+    }
+}
+
+/**
  * Комментарии копировались из статьи.
  * @see <a href=\"https://habr.com/ru/post/339416/\">Статья</a>.
  */
@@ -53,18 +75,24 @@ class PlayerService : Service() {
      * Например, если мы не укажем ACTION_PAUSE, то нажатие на паузу не вызовет onPause.
      * ACTION_PLAY_PAUSE обязателен, иначе не будет работать управление с Android Wear!
      */
-    private val playbackStateBuilder: PlaybackStateCompat.Builder by lazy(LazyThreadSafetyMode.NONE) {
-        PlaybackStateCompat.Builder().setActions(
-            PlaybackStateCompat.ACTION_PLAY
-                or PlaybackStateCompat.ACTION_STOP
-                or PlaybackStateCompat.ACTION_PAUSE
-                or PlaybackStateCompat.ACTION_PLAY_PAUSE
-                or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-        )
-    }
+    private val playbackStateBuilder = PlaybackStateCompat.Builder().setActions(
+        PlaybackStateCompat.ACTION_PLAY
+            or PlaybackStateCompat.ACTION_STOP
+            or PlaybackStateCompat.ACTION_PAUSE
+            or PlaybackStateCompat.ACTION_PLAY_PAUSE
+            or PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+            or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+    )
 
     private val exoPlayer: SimpleExoPlayer by lazy(LazyThreadSafetyMode.NONE) {
         SimpleExoPlayer.Builder(this).build().apply { addListener(playerListener) }
+    }
+
+    private val handler = Handler(Looper.getMainLooper())
+
+    /** @see PlayerParams.fadeInSpeed */
+    private val fadeInVolumeRunnable: Runnable? by lazy(LazyThreadSafetyMode.NONE) {
+        playerParams.fadeInSpeed?.let { VolumeRunnable(exoPlayer, handler, it) }
     }
 
     /**
@@ -99,8 +127,8 @@ class PlayerService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
-        initServiceIfNotYet(intent)
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.let(::initService)
         /*
             MediaButtonReceiver при получении события ищет в приложении сервис,
             который также принимает "android.intent.action.MEDIA_BUTTON" и перенаправляет его туда.
@@ -110,26 +138,25 @@ class PlayerService : Service() {
         return super.onStartCommand(intent, flags, startId)
     }
 
-    private fun initServiceIfNotYet(intent: Intent) {
-        if (!isServiceInitialized) {
-            isServiceInitialized = true
-            musicRepository = intent.getParcelable(MUSIC_REPO)
+    private fun initService(intent: Intent) {
+        if (intent.hasExtra(PLAYER_PARAMS)) {
+            val playerParams = intent.getParcelable<PlayerParams>(PLAYER_PARAMS).also { playerParams = it }
             mediaSession.setSessionActivity(intent.getParcelable(PENDING_INTENT))
-            setDefaultState(musicRepository.current, intent.getBooleanExtra(PLAY_ON_START, false))
+            setDefaultState(playerParams)
         }
     }
 
-    private var isServiceInitialized = false
-    private lateinit var musicRepository: MusicRepository
+    private lateinit var playerParams: PlayerParams
+    private val musicRepository: MusicRepository get() = playerParams.repository
 
-    private fun setDefaultState(currentTrack: Track, playOnStart: Boolean) {
-        mediaSession.setMetadata(currentTrack.createMetadata(context = this@PlayerService))
+    private fun setDefaultState(playerParams: PlayerParams) {
+        mediaSession.setMetadata(playerParams.repository.current.createMetadata(context = this@PlayerService))
         // Указываем, что наше приложение теперь активный плеер и кнопки
         // на окне блокировки должны управлять именно нами
         // Сразу после получения фокуса
         mediaSession.isActive = true
 
-        if (playOnStart) {
+        if (playerParams.playOnStart) {
             mediaSessionCallback.onPlay()
         } else {
             // Обязательно стартуем, иначе будет ANR
@@ -139,15 +166,23 @@ class PlayerService : Service() {
         }
     }
 
+    private var binder: PlayerServiceBinder? = null
+
     /** Для доступа извне к MediaSession требуется токен. Для этого научим сервис его отдавать. */
     override fun onBind(intent: Intent): IBinder =
-        PlayerServiceBinder(mediaSession)
+        PlayerServiceBinder(mediaSession).also { binder = it }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        binder = null
+        return super.onUnbind(intent)
+    }
 
     override fun onDestroy() {
         super.onDestroy()
         // Ресурсы освобождать обязательно
         mediaSession.release()
         exoPlayer.release()
+        cache.release()
         try {
             unregisterReceiver(becomingNoisyReceiver)
         } catch (e: IllegalArgumentException) {
@@ -159,6 +194,8 @@ class PlayerService : Service() {
         val debugTag = "PlayerService"
         MediaSessionCompat(this, debugTag).apply { setCallback(mediaSessionCallback) }
     }
+
+    private var currentTrackUri: Uri? = null
 
     private val mediaSessionCallback: MediaSessionCompat.Callback = object : MediaSessionCompat.Callback() {
         private var currentState = PlaybackStateCompat.STATE_STOPPED
@@ -195,6 +232,11 @@ class PlayerService : Service() {
 
                 // Запускаем воспроизведение
                 exoPlayer.playWhenReady = true
+                exoPlayer.repeatMode = if (track.repeatable) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                fadeInVolumeRunnable?.let {
+                    exoPlayer.volume = 0f
+                    handler.post(it)
+                }
             }
             currentState = PlaybackStateCompat.STATE_PLAYING
         }
@@ -235,10 +277,9 @@ class PlayerService : Service() {
             (musicRepository as? MultiTrackRepository)?.let { changeTrack(it.previous()) }
         }
 
-        private var currentUri: Uri? = null
         private fun prepareToPlay(uri: Uri) {
-            if (uri != currentUri) {
-                currentUri = uri
+            if (currentTrackUri != uri) {
+                currentTrackUri = uri
                 exoPlayer.prepare(
                     ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory).createMediaSource(uri)
                 )
@@ -288,14 +329,19 @@ class PlayerService : Service() {
         }
     }
 
-    private val extractorsFactory: ExtractorsFactory = DefaultExtractorsFactory()
-    private val dataSourceFactory: DataSource.Factory by lazy(LazyThreadSafetyMode.NONE) {
+    private val cache: SimpleCache by lazy(LazyThreadSafetyMode.NONE) {
         val cacheFile = File(this.cacheDir.absolutePath + "/exoplayer")
         val cacheEvictor = LeastRecentlyUsedCacheEvictor(1024 * 1024 * 100) // 100 Mb max
-        val userAgent = Util.getUserAgent(this, getString(R.string.app_name))
+        SimpleCache(cacheFile, cacheEvictor, ExoDatabaseProvider(this))
+    }
+    private val extractorsFactory: ExtractorsFactory = DefaultExtractorsFactory()
+    private val dataSourceFactory: DataSource.Factory by lazy(LazyThreadSafetyMode.NONE) {
         CacheDataSourceFactory(
-            SimpleCache(cacheFile, cacheEvictor, ExoDatabaseProvider(this)),
-            OkHttpDataSourceFactory(OkHttpClient(), userAgent),
+            cache,
+            OkHttpDataSourceFactory(
+                OkHttpClient(),
+                Util.getUserAgent(this, getString(R.string.app_name))
+            ),
             CacheDataSource.FLAG_BLOCK_ON_CACHE or CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
         )
     }
@@ -338,8 +384,17 @@ class PlayerService : Service() {
     private val playerListener = object : Player.EventListener {
         override fun onTracksChanged(trackGroups: TrackGroupArray, trackSelections: TrackSelectionArray) = Unit
         override fun onLoadingChanged(isLoading: Boolean) = Unit
-        override fun onPlayerError(error: ExoPlaybackException) = Unit
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) = Unit
+        override fun onPlayerError(error: ExoPlaybackException) {
+            if (error.type == ExoPlaybackException.TYPE_SOURCE) {
+                binder?.sendMsg?.invoke(PlayerMsg.ConnectionError)
+
+                // Это необходимо, т.к. при отстутсвии интернета, после подключения к сети трек ну будет проигрываться.
+                currentTrackUri = null
+            } else {
+                error.printStackTrace()
+            }
+        }
 
         override fun onPlayerStateChanged(playWhenReady: Boolean, playbackState: Int) {
             if (playWhenReady && playbackState == Player.STATE_ENDED) {
@@ -357,14 +412,12 @@ class PlayerService : Service() {
         )
 
     companion object {
-        private const val MUSIC_REPO = "music_repository"
         private const val PENDING_INTENT = "pending_intent"
-        private const val PLAY_ON_START = "play_on_start"
+        private const val PLAYER_PARAMS = "player_params"
 
-        fun putParams(intent: Intent, musicRepository: MusicRepository, pendingIntent: PendingIntent, playOnStart: Boolean) {
-            intent.putExtra(MUSIC_REPO, musicRepository)
+        fun putParams(intent: Intent, pendingIntent: PendingIntent, playerParams: PlayerParams) {
             intent.putExtra(PENDING_INTENT, pendingIntent)
-            intent.putExtra(PLAY_ON_START, playOnStart)
+            intent.putExtra(PLAYER_PARAMS, playerParams)
         }
 
         private const val NOTIFICATION_ID = 404
@@ -372,8 +425,14 @@ class PlayerService : Service() {
     }
 }
 
+sealed class PlayerMsg {
+    object ConnectionError : PlayerMsg()
+}
+
 /** Биндер, с помощью которого можно прокидывать [MediaSessionCompat.getSessionToken]. */
 class PlayerServiceBinder(private val mediaSession: MediaSessionCompat) : Binder() {
     val mediaSessionToken: MediaSessionCompat.Token
         get() = mediaSession.sessionToken
+
+    var sendMsg: (PlayerMsg) -> Unit = {}
 }

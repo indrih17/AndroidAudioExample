@@ -6,12 +6,23 @@ import kotlinx.android.parcel.IgnoredOnParcel
 import kotlinx.android.parcel.Parcelize
 import ru.vinyarsky.androidaudioexample.R
 
+/**
+ * Музыкальный трек.
+ * @param title Название.
+ * @param artist Автор трека.
+ * @param bitmapResId Ресурс на битмапу, которая будет отображаться в пуше.
+ * @param uriString Ссылка, откуда брать трек.
+ * @param durationMs Продолжительность трека (в миллисекундах).
+ * @param repeatable Зациклить трек или нет.
+ * @property uri Ссылка на трек в виде [Uri].
+ */
 class Track(
     val title: String,
     val artist: String,
     val bitmapResId: Int,
     uriString: String,
-    val durationMs: Long
+    val durationMs: Long,
+    val repeatable: Boolean = false
 ) {
     val uri: Uri = Uri.parse(uriString)
 }
